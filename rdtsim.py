@@ -119,9 +119,9 @@ class EntityA:
     # The argument `message` is a Msg containing the data to be sent.
     def output(self, message):
         # make a packet with the message
-        sndpkt = Pkt(self.seqnum, self.acknum, self.checksum, message)
+        self.sndpkt = Pkt(self.seqnum, self.acknum, self.checksum, message)
         # receive data and call to_layer3() -> handled by network -> handled by EntityB
-        to_layer3(self, sndpkt)
+        to_layer3(self, self.sndpkt)
         # alternate the bit
         if self.seqnum == 0:
             self.seqnum = 1
@@ -129,7 +129,9 @@ class EntityA:
         else:
             self.seqnum = 0
             self.acknum = 0
-        # increment ACK
+
+        # wait for ACK from EntityB, start timer
+        start_timer(self, 5)
 
         pass
 
@@ -141,6 +143,9 @@ class EntityA:
 
     # Called when A's timer goes off.
     def timer_interrupt(self):
+        # send the packet again
+        to_layer3(self, self.sndpkt)
+        start_timer(self, 5)
         pass
 
 
