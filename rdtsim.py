@@ -36,6 +36,7 @@
 ##
 
 import argparse
+import queue
 from copy import deepcopy
 from enum import Enum, auto
 import random
@@ -110,16 +111,19 @@ class EntityA:
     # all seqnums must be in the range 0-15.
     def __init__(self, seqnum_limit):
         self.seqnum_limit = seqnum_limit
-        self.seqnum = 0 # TODO: alternate between 0 and 1
+        self.seqnum = 0
         self.acknum = 0
-        self.checksum = 0
+        self.checksum = 0 #TODO: Calculate checksum
+        self.incoming_queue = queue.Queue(maxsize=seqnum_limit)
         pass
 
     # Called from layer 5, passed the data to be sent to other side.
     # The argument `message` is a Msg containing the data to be sent.
     def output(self, message):
+        # calculate checksum
+        self.checksum = hash(Pkt(self.seqnum, self.acknum, self.checksum, message.data))
         # make a packet with the message
-        self.sndpkt = Pkt(self.seqnum, self.acknum, self.checksum, message)
+        self.sndpkt = Pkt(self.seqnum, self.acknum, self.checksum, message.data)
         # receive data and call to_layer3() -> handled by network -> handled by EntityB
         to_layer3(self, self.sndpkt)
         # alternate the bit
@@ -139,13 +143,17 @@ class EntityA:
     # The argument `packet` is a Pkt containing the newly arrived packet.
     def input(self, packet):
         # TODO: parse this packet
+        # # first add it to the queue
+        # if self.incoming_queue.full() is False:
+        #     self.incoming_queue.put(packet)
+        to_layer5(self, Msg(packet.payload))
         pass
 
     # Called when A's timer goes off.
     def timer_interrupt(self):
         # send the packet again
-        to_layer3(self, self.sndpkt)
-        start_timer(self, 5)
+        # to_layer3(self, self.sndpkt)
+        # start_timer(self, 5)
         pass
 
 
@@ -160,7 +168,7 @@ class EntityB:
     # Called from layer 3, when a packet arrives for layer 4 at EntityB.
     # The argument `packet` is a Pkt containing the newly arrived packet.
     def input(self, packet):
-        to_layer5(self, packet)
+        to_layer5(self, Msg(packet.payload))
         pass
 
     # Called when B's timer goes off.
