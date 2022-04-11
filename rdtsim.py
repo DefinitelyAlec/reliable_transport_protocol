@@ -36,7 +36,6 @@
 ##
 
 import argparse
-import queue
 from copy import deepcopy
 from enum import Enum, auto
 import random
@@ -110,51 +109,86 @@ class EntityA:
     # zero and seqnum_limit-1, inclusive.  E.g., if seqnum_limit is 16, then
     # all seqnums must be in the range 0-15.
     def __init__(self, seqnum_limit):
-        self.seqnum_limit = seqnum_limit
+        # self.seqnum_limit = seqnum_limit
         self.seqnum = 0
         self.acknum = 0
-        self.checksum = 0 #TODO: Calculate checksum
-        self.incoming_queue = queue.Queue(maxsize=seqnum_limit)
-        pass
+        self.buffer = []
+        self.wait_for_ack = 0
+        self.wait = False
+        self.wait_pkt = None
+        self.pkt_num = 0
 
     # Called from layer 5, passed the data to be sent to other side.
     # The argument `message` is a Msg containing the data to be sent.
     def output(self, message):
         # calculate checksum
-        self.checksum = hash(Pkt(self.seqnum, self.acknum, self.checksum, message.data))
+        # if b'jjjjjjjjjjjjjjjjjjjj' == message.data or b'hhhhhhhhhhhhhhhhhhhh' == message.data or self.pkt_num == 163:
+        #     flag = True
+        checksum = hash(bytes(self.acknum) + bytes(self.seqnum) + message.data)
         # make a packet with the message
-        self.sndpkt = Pkt(self.seqnum, self.acknum, self.checksum, message.data)
-        # receive data and call to_layer3() -> handled by network -> handled by EntityB
-        to_layer3(self, self.sndpkt)
-        # alternate the bit
-        if self.seqnum == 0:
-            self.seqnum = 1
-            self.acknum = 1
+        sndpkt = Pkt(self.seqnum, self.acknum, checksum, message.data)
+        if self.wait:
+            self.buffer.append(sndpkt)
+            if TRACE > 0: print(f"added to buffer: {sndpkt}")
+            # print(self.buffer)
         else:
-            self.seqnum = 0
-            self.acknum = 0
+            # first check if the buffer is empty
+            if len(self.buffer) == 0:
+                # nothing in the buffer! send the sndpkt on its way
+                if TRACE > 0: print(f'sent packet with payload: {sndpkt.payload.decode("utf-8")} NOTHING IN BUFFER')
+                to_layer3(self, sndpkt)
+                self.wait_for_ack = sndpkt.acknum
+                self.wait = True
+                start_timer(self, 15)
+                self.wait_pkt = sndpkt
+            else:
+                # buffer has stuff in it, add current packet to buffer
+                self.buffer.append(sndpkt)
+                # and take the first packet out of the buffer instead
+                sndpkt = self.buffer.pop(0)
+                if TRACE > 0: print(f'sent packet with payload: {sndpkt.payload.decode("utf-8")} NEXT FROM BUFFER IN OUTPUT()')
+                to_layer3(self, sndpkt)
+                self.wait_for_ack = sndpkt.acknum
+                self.wait = True
+                start_timer(self, 15)
+                self.wait_pkt = sndpkt
 
-        # wait for ACK from EntityB, start timer
-        start_timer(self, 5)
-
-        pass
+        # alternate bit
+        self.seqnum = 1 if self.seqnum == 0 else 0
+        self.acknum = 1 if self.acknum == 0 else 0
+        self.pkt_num += 1
 
     # Called from layer 3, when a packet arrives for layer 4 at EntityA.
     # The argument `packet` is a Pkt containing the newly arrived packet.
     def input(self, packet):
-        # TODO: parse this packet
-        # # first add it to the queue
-        # if self.incoming_queue.full() is False:
-        #     self.incoming_queue.put(packet)
-        to_layer5(self, Msg(packet.payload))
-        pass
+        # check if packet is corrupt
+        if TRACE > 0: print(f'3: received packet seq: {packet.seqnum} with data: {packet.payload.decode("utf-8")} from B')
+        check_checksum = hash(bytes(packet.acknum) + bytes(packet.seqnum) + packet.payload)
+        if packet.payload != b'ACK_________________' and packet.checksum != check_checksum or packet.acknum != self.wait_for_ack:
+            # CORRUPT! or wrong ack, do nothing
+            pass
+        elif packet.checksum == check_checksum and packet.acknum == self.wait_for_ack:
+            if TRACE > 0: print(f"ACK received for packet with payload: {packet.payload.decode('utf-8')}")
+            stop_timer(self)
+            self.wait = False
+            # check the buffer
+            while len(self.buffer) > 0:
+                # send the next packet to B from the buffer
+                sndpkt = self.buffer.pop(0)
+                if TRACE > 0: print(f'sent packet with payload: {sndpkt.payload.decode("utf-8")} NEXT FROM BUFFER FROM INPUT()')
+                to_layer3(self, sndpkt)
+                self.wait_for_ack = sndpkt.acknum
+                start_timer(self, 15)
+                self.wait_pkt = sndpkt
+                self.wait = True
+
 
     # Called when A's timer goes off.
     def timer_interrupt(self):
         # send the packet again
-        # to_layer3(self, self.sndpkt)
-        # start_timer(self, 5)
-        pass
+        if TRACE > 0: print(f'sent packet with payload: {self.wait_pkt.payload.decode("utf-8")} RESEND PACKET TIMEOUT')
+        to_layer3(self, self.wait_pkt)
+        start_timer(self, 15)
 
 
 class EntityB:
@@ -163,13 +197,42 @@ class EntityB:
     #
     # See comment for the meaning of seqnum_limit.
     def __init__(self, seqnum_limit):
+        self.expected_seqnum = 0
+        self.prev_packet = None
+        self.rec_packets = set()
         pass
 
     # Called from layer 3, when a packet arrives for layer 4 at EntityB.
     # The argument `packet` is a Pkt containing the newly arrived packet.
     def input(self, packet):
-        to_layer5(self, Msg(packet.payload))
-        pass
+        # check if corrupt first
+        if TRACE > 0: print(f'2: received packet seq: {packet.seqnum} with data: {packet.payload.decode("utf-8")} from A')
+        check_checksum = hash(bytes(packet.acknum) + bytes(packet.seqnum) + packet.payload)
+        if packet.checksum != check_checksum or packet.seqnum != self.expected_seqnum:
+            # CORRUPT! or wrong seq number
+            if TRACE > 0: print(f"[B] packet corrupt. Received payload: {packet.payload}")
+            # to_layer3(self, Pkt(-1, -1, check_checksum, packet.payload))
+            if self.expected_seqnum == 0:
+                temp_checksum = hash(bytes(1) + bytes(1) + b'ACK_________________')
+                sndpkt = Pkt(1, 1, temp_checksum, b'ACK_________________')
+                start_timer(self, 15)
+                to_layer3(self, sndpkt)
+            else:
+                temp_checksum = hash(bytes(0) + bytes(0) + b'ACK_________________')
+                sndpkt = Pkt(0, 0, temp_checksum, b'ACK_________________')
+                start_timer(self, 15)
+                to_layer3(self, sndpkt)
+        # elif packet == self.prev_packet:
+        #     # duplicate packet received, send back ack of said packet
+        #     to_layer3(self, Pkt(packet.seqnum, packet.acknum, packet.checksum, packet.payload))
+        elif packet.checksum == check_checksum and packet.seqnum == self.expected_seqnum:
+            if TRACE > 0: print(f"delivered packet with payload: {packet.payload.decode('utf-8')}")
+            to_layer5(self, Msg(packet.payload))
+            # ack back to A
+            sndpkt = Pkt(packet.seqnum, packet.acknum, packet.checksum, b'ACK_________________')
+            to_layer3(self, sndpkt)
+            start_timer(self, 15)
+            self.expected_seqnum = 1 if self.expected_seqnum == 0 else 0
 
     # Called when B's timer goes off.
     def timer_interrupt(self):
